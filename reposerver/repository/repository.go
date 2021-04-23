@@ -68,7 +68,7 @@ type Service struct {
 	cache                     *reposervercache.Cache
 	parallelismLimitSemaphore *semaphore.Weighted
 	metricsServer             *metrics.MetricsServer
-	newGitClient              func(rawRepoURL string, creds git.Creds, insecure bool, enableLfs bool) (git.Client, error)
+	newGitClient              func(rawRepoURL string, creds git.Creds, insecure bool, enableLfs bool, opts ...git.ClientOpts) (git.Client, error)
 	newHelmClient             func(repoURL string, creds helm.Creds, enableOci bool) helm.Client
 	initConstants             RepoServerInitConstants
 	// now is usually just time.Now, but may be replaced by unit tests for testing purposes
@@ -164,6 +164,7 @@ func (s *Service) ListApps(ctx context.Context, q *apiclient.ListAppsRequest) (*
 type operationSettings struct {
 	sem             *semaphore.Weighted
 	noCache         bool
+	noRevisionCache bool
 	allowConcurrent bool
 }
 
@@ -208,7 +209,7 @@ func (s *Service) runRepoOperation(
 			return nil, err
 		}
 	} else {
-		gitClient, revision, err = s.newClientResolveRevision(repo, revision)
+		gitClient, revision, err = s.newClientResolveRevision(repo, revision, git.WithCache(s.cache, !settings.noRevisionCache && !settings.noCache))
 		if err != nil {
 			return nil, err
 		}
@@ -295,7 +296,7 @@ func (s *Service) GenerateManifest(ctx context.Context, q *apiclient.ManifestReq
 			return s.getManifestCacheEntry(cacheKey, q, firstInvocation)
 		}, func(repoRoot, commitSHA, cacheKey string, ctxSrc operationContextSrc) (interface{}, error) {
 			return s.runManifestGen(repoRoot, commitSHA, cacheKey, ctxSrc, q)
-		}, operationSettings{sem: s.parallelismLimitSemaphore, noCache: q.NoCache, allowConcurrent: q.ApplicationSource.AllowsConcurrentProcessing()})
+		}, operationSettings{sem: s.parallelismLimitSemaphore, noCache: q.NoCache, noRevisionCache: q.NoRevisionCache, allowConcurrent: q.ApplicationSource.AllowsConcurrentProcessing()})
 	result, ok := resultUncast.(*apiclient.ManifestResponse)
 	if result != nil && !ok {
 		return nil, errors.New("unexpected result type")
@@ -1349,8 +1350,8 @@ func fileParameters(q *apiclient.RepoServerAppDetailsQuery) []v1alpha1.HelmFileP
 	return q.Source.Helm.FileParameters
 }
 
-func (s *Service) newClient(repo *v1alpha1.Repository) (git.Client, error) {
-	gitClient, err := s.newGitClient(repo.Repo, repo.GetGitCreds(), repo.IsInsecure(), repo.EnableLFS)
+func (s *Service) newClient(repo *v1alpha1.Repository, opts ...git.ClientOpts) (git.Client, error) {
+	gitClient, err := s.newGitClient(repo.Repo, repo.GetGitCreds(), repo.IsInsecure(), repo.EnableLFS, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1359,8 +1360,8 @@ func (s *Service) newClient(repo *v1alpha1.Repository) (git.Client, error) {
 
 // newClientResolveRevision is a helper to perform the common task of instantiating a git client
 // and resolving a revision to a commit SHA
-func (s *Service) newClientResolveRevision(repo *v1alpha1.Repository, revision string) (git.Client, string, error) {
-	gitClient, err := s.newClient(repo)
+func (s *Service) newClientResolveRevision(repo *v1alpha1.Repository, revision string, opts ...git.ClientOpts) (git.Client, string, error) {
+	gitClient, err := s.newClient(repo, opts...)
 	if err != nil {
 		return nil, "", err
 	}
